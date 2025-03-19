@@ -5,8 +5,16 @@
 brew install librealsense
 brew install opencv
 brew install glfw
-pip install pyrealsense2 opencv-python numpy
+
+#then install requirements file
+pip3 install -r requirements.txt
 
 ##Virtual Env
 python3 -m venv myenv
 source myenv/bin/activate
+
+#run main.py
+python3 main.py
+
+#run depth.py
+sudo python3 depth.py
