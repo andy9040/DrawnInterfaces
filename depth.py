@@ -4,13 +4,10 @@ import pyrealsense2 as rs
 import mediapipe as mp
 import simpleaudio as sa  # For sound playback
 import time
+import pygame
 
-# Load sounds for shape interactions
-# sounds = {
-#     "CYMBAL": sa.WaveObject.from_wave_file("cymbal.wav"),
-#     "PIANO KEY": sa.WaveObject.from_wave_file("piano.wav"),
-#     "DRUM": sa.WaveObject.from_wave_file("drum.wav"),
-# }
+
+
 
 # Simulated detected shapes (x, y, width, height)
 detected_shapes = {
@@ -18,6 +15,14 @@ detected_shapes = {
     "PIANO KEY": (300, 200, 100, 50),
     "DRUM": (500, 100, 120, 120),
 }
+
+pygame.mixer.init()
+
+cymbal = pygame.mixer.Sound('cymbal.wav') 
+piano = pygame.mixer.Sound('piano.wav') 
+drum = pygame.mixer.Sound('drum.wav') 
+
+sound_map = {'PIANO KEY': piano, 'CYMBAL': cymbal, 'DRUM': drum}
 
 # Initialize RealSense pipeline
 pipeline = rs.pipeline()
@@ -110,7 +115,8 @@ while True:
         if finger_pos and (sx < finger_pos[0] < sx + sw and sy < finger_pos[1] < sy + sh):
             color = (0, 255, 0)  # Change to Green
             print(f"Finger touched {shape}!")
-            # sounds[shape].play()  # Play sound
+            sound_map[shape].play()
+
 
         # Draw shape
         cv2.rectangle(color_image, (sx, sy), (sx + sw, sy + sh), color, 3)
