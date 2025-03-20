@@ -4,6 +4,18 @@ import pyrealsense2 as rs
 import mediapipe as mp
 import time
 from collections import deque
+import pygame
+
+
+pygame.mixer.init()
+
+cymbal = pygame.mixer.Sound('cymbal.wav') 
+piano = pygame.mixer.Sound('piano.wav') 
+drum = pygame.mixer.Sound('drum.wav') 
+
+sound_map = {'PIANO KEY': piano, 'CYMBAL': cymbal, 'DRUM': drum}
+
+
 
 # Track previous shape detections for stabilization
 shape_history = {}  
@@ -189,8 +201,9 @@ while True:
             color = (0, 255, 0)  # Change to Green
             print(f"Finger touched {shape}!")
 
-        # Draw shape bounding box
-        cv2.rectangle(processed_frame, (sx, sy), (sx + sw, sy + sh), color, 3)
+            sound_map[shape].play()
+
+        # Instead of drawing a rectangle, just label the shape
         cv2.putText(processed_frame, shape, (sx, sy - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
     # Display the output
