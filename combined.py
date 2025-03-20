@@ -1,91 +1,52 @@
 import cv2
 import numpy as np
-from collections import deque
 import pyrealsense2 as rs
-
+import mediapipe as mp
+import time
+from collections import deque
 
 # Track previous shape detections for stabilization
 shape_history = {}  
 history_length = 10  
 
+# Initialize RealSense pipeline
+pipeline = rs.pipeline()
+config = rs.config()
+config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 15)  # Lower frame rate
+config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 15)  # Lower depth frame rate
+
+# Align depth to color stream
+align = rs.align(rs.stream.color)
+
+# Start pipeline
+pipeline.start(config)
+time.sleep(2)
+
+# Initialize MediaPipe Hands
+mp_hands = mp.solutions.hands
+hands = mp_hands.Hands(static_image_mode=False, max_num_hands=1, min_detection_confidence=0.5)
+mp_draw = mp.solutions.drawing_utils
+
+def get_depth_at_pixel(depth_frame, x, y):
+    """Retrieve the depth value (mm) at the given (x, y) pixel location."""
+    depth_image = np.asanyarray(depth_frame.get_data())
+    if 0 <= x < depth_image.shape[1] and 0 <= y < depth_image.shape[0]:
+        depth_value = depth_image[y, x]
+        return depth_value
+    return None
+
 def preprocess_image(frame):
     """Preprocess image: convert to grayscale, apply thresholding & edge smoothing."""
-    cv2.imshow('Round 0', frame)
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    cv2.imshow('Round 1', blurred)
-
-    # Adaptive thresholding to reduce noise
     thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
                                    cv2.THRESH_BINARY_INV, 11, 4)
-    cv2.imshow('Round 2', thresh)
-
-    # Morphological closing to connect broken edges
     kernel = np.ones((3, 3), np.uint8)
     cleaned = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
-    cv2.imshow('Round 3', cleaned)
-
-
     return cleaned
 
-# def preprocess_image(frame):
-#     """Preprocess the image to remove noise and enhance shape detection."""
-#     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-#     # Apply Gaussian blur to smooth out noise before thresholding
-#     blurred = cv2.GaussianBlur(gray, (7, 7), 0)
-
-#     # Use Otsu's thresholding instead of adaptive thresholding
-#     _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-
-#     cv2.imshow('Round 1', thresh)
-
-#     # Morphological operations to remove small noise
-#     kernel = np.ones((3, 3), np.uint8)
-#     thresh = cv2.erode(thresh, kernel, iterations=2)  # Remove tiny dots
-
-#     cv2.imshow('Round 2', thresh)
-
-#     thresh = cv2.dilate(thresh, kernel, iterations=2)  # Restore main shapes
-
-#     cv2.imshow('Round 3', thresh)
-
-
-#     return thresh
-
-
-
-def merge_contours_old(contours):
-    """Merges overlapping contours to prevent duplicate detections."""
-    merged_contours = []
-    contour_boxes = [cv2.boundingRect(c) for c in contours]
-    used = set()  # Track merged contours
-
-    for i, rect1 in enumerate(contour_boxes):
-        if i in used:  # Skip if already merged
-            continue
-
-        x1, y1, w1, h1 = rect1
-        merged = contours[i]
-
-        for j, rect2 in enumerate(contour_boxes):
-            if i != j and j not in used:
-                x2, y2, w2, h2 = rect2
-
-                # Check if bounding boxes overlap significantly
-                if (x1 < x2 + w2 and x1 + w1 > x2 and
-                    y1 < y2 + h2 and y1 + h1 > y2):
-                    merged = np.vstack((merged, contours[j]))  # Merge contours
-                    used.add(j)
-
-        used.add(i)
-        merged_contours.append(cv2.convexHull(merged))  # Store final merged contour
-
-    return merged_contours
-
-
 def merge_contours(contours):
-    """Merges only small overlapping contours instead of merging everything."""
+    """Merges small overlapping contours instead of merging everything."""
     merged_contours = []
     contour_boxes = [cv2.boundingRect(c) for c in contours]
     used = set()
@@ -100,11 +61,8 @@ def merge_contours(contours):
         for j, rect2 in enumerate(contour_boxes):
             if i != j and j not in used:
                 x2, y2, w2, h2 = rect2
-
-                # Only merge if both contours are relatively small
                 if (x1 < x2 + w2 and x1 + w1 > x2 and
                     y1 < y2 + h2 and y1 + h1 > y2 and max(w1, h1, w2, h2) < 300):
-                    
                     merged = np.vstack((merged, contours[j]))
                     used.add(j)
 
@@ -118,16 +76,12 @@ def detect_shapes(frame):
 
     preprocessed = preprocess_image(frame)
     
-    # Find contours
     contours, _ = cv2.findContours(preprocessed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    # Merge overlapping contours
     contours = merge_contours(contours)
 
     detected_shapes = []
 
     frame_area = frame.shape[0] * frame.shape[1]  # Total pixels in the frame
-
 
     for contour in contours:
         approx = cv2.approxPolyDP(contour, 0.02 * cv2.arcLength(contour, True), True)
@@ -137,11 +91,10 @@ def detect_shapes(frame):
         x, y, w, h = cv2.boundingRect(approx)
         area = cv2.contourArea(contour)
 
-        # Ignore small noisy objects
         if area < 1000 or w < 50 or h < 50:
             continue
 
-        if area > frame_area * 0.6:  # Ignore if it's covering more than 60% of the frame
+        if area > frame_area * 0.6:
             continue
 
         # Shape classification
@@ -166,102 +119,89 @@ def detect_shapes(frame):
 
         cv2.drawContours(frame, [approx], -1, color, 3)
         cv2.putText(frame, most_common_shape, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-        detected_shapes.append(most_common_shape)
+        detected_shapes.append((most_common_shape, (x, y, w, h)))  # Return shape and bounding box
 
-    return frame
+    return frame, detected_shapes
 
-# Start camera capture
-cap = cv2.VideoCapture(0)
-
-if not cap.isOpened():
-    print("Could not open RealSense camera")
-    exit()
-
+def restart_pipeline():
+    global pipeline
+    print("Restarting RealSense pipeline...")
+    pipeline.stop()
+    time.sleep(2)
+    pipeline.start(config)
 
 while True:
-    ret, frame = cap.read()
-    if not ret:
-        print("Failed to capture frame")
-        break
+    # Capture frames
+    frames = pipeline.wait_for_frames(timeout_ms=5000)
+    if not frames:
+        print("ERROR: No frames received. Restarting pipeline...")
+        restart_pipeline()
+        continue
 
-    cv2.imshow('Before', frame)
+    # Align depth and color frames
+    aligned_frames = align.process(frames)
+    depth_frame = aligned_frames.get_depth_frame()
+    color_frame = aligned_frames.get_color_frame()
 
-    processed_frame = detect_shapes(frame)
-    cv2.imshow('Improved Shape Detection', processed_frame)
+    if not depth_frame or not color_frame:
+        print("No valid frame received. Retrying...")
+        continue
 
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        print("QUIT")
-        break
-    elif cv2.waitKey(1) & 0xFF == ord('d'):
-        print("DEPTH MODE ACTIVATED")
-        pipeline = rs.pipeline()
-        config = rs.config()
+    # Convert to NumPy arrays
+    depth_image = np.asanyarray(depth_frame.get_data())
+    color_image = np.asanyarray(color_frame.get_data())
 
-        # Enable both color and depth streams
-        config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
-        config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+    # Convert color image to RGB for MediaPipe
+    rgb_image = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
 
-        # Align depth map to color stream
-        align = rs.align(rs.stream.color)
+    # Process hand tracking
+    result = hands.process(rgb_image)
+    finger_pos = None
+    finger_depth = None
 
-        # Start pipeline
-        pipeline.start(config)
+    if result.multi_hand_landmarks:
+        for hand_landmarks in result.multi_hand_landmarks:
+            # Get index finger tip coordinates (landmark 8)
+            h, w, _ = color_image.shape
+            x = int(hand_landmarks.landmark[8].x * w)
+            y = int(hand_landmarks.landmark[8].y * h)
 
-        def get_closest_point(depth_frame):
-            """Find the closest point in the depth frame (potentially a finger)."""
-            depth_image = np.asanyarray(depth_frame.get_data())
-            
-            # Ignore 0-depth areas (invalid readings)
-            depth_image[depth_image == 0] = np.max(depth_image)
+            # Get depth at the finger's pixel location
+            finger_depth = get_depth_at_pixel(depth_frame, x, y)
+            finger_pos = (x, y)
 
-            # Get the minimum depth point (closest object)
-            min_val = np.min(depth_image)
-            min_loc = np.unravel_index(np.argmin(depth_image), depth_image.shape)
+            # Draw the hand landmarks
+            mp_draw.draw_landmarks(color_image, hand_landmarks, mp_hands.HAND_CONNECTIONS)
 
-            return min_loc[::-1], min_val  # Return (X, Y), Depth
-
-        while True:
-            # Wait for frames
-            frames = pipeline.wait_for_frames()
-            aligned_frames = align.process(frames)
-            
-            # Get depth and color frames
-            depth_frame = aligned_frames.get_depth_frame()
-            color_frame = aligned_frames.get_color_frame()
-            
-            if not depth_frame or not color_frame:
-                continue
-            
-            # Convert images to numpy arrays
-            depth_image = np.asanyarray(depth_frame.get_data())
-            color_image = np.asanyarray(color_frame.get_data())
-
-            # Get closest hand point (finger tip)
-            finger_pos, finger_depth = get_closest_point(depth_frame)
-            
-            # Draw finger point on color image
-            cv2.circle(color_image, finger_pos, 10, (0, 0, 255), -1)
-            cv2.putText(color_image, f"Depth: {finger_depth}mm", (finger_pos[0], finger_pos[1] - 10),
+            # Draw the detected finger tip
+            cv2.circle(color_image, (x, y), 10, (0, 0, 255), -1)
+            cv2.putText(color_image, f"Depth: {finger_depth}mm", (x, y - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
-            # Check if finger is touching a detected shape
-            for shape, (x, y, w, h) in detected_shapes.items():
-                if x < finger_pos[0] < x + w and y < finger_pos[1] < y + h:
-                    print(f"Finger touched {shape}!")
-                    # sounds[shape].play()  # Play corresponding sound
-            
-            # Display depth and color frames
-            cv2.imshow("Depth View", depth_image)
-            cv2.imshow("Shape Interaction", color_image)
+    # Detect and draw shapes
+    processed_frame, detected_shapes = detect_shapes(color_image)
 
-            # Exit on 'q' key
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+    # Draw detected shapes and check for interactions
+    for shape, (sx, sy, sw, sh) in detected_shapes:
+        color = (255, 0, 0)  # Default Blue
+        # If the finger is detected and touching the shape, highlight in green
+        if finger_pos and (sx < finger_pos[0] < sx + sw and sy < finger_pos[1] < sy + sh):
+            color = (0, 255, 0)  # Change to Green
+            print(f"Finger touched {shape}!")
 
-        # Cleanup
-        pipeline.stop()
-        cv2.destroyAllWindows()
+        # Draw shape bounding box
+        cv2.rectangle(processed_frame, (sx, sy), (sx + sw, sy + sh), color, 3)
+        cv2.putText(processed_frame, shape, (sx, sy - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
+    # Display the output
+    cv2.imshow("Hand & Shape Detection", processed_frame)
 
-cap.release()
+    # Exit on 'q'
+    key = cv2.waitKey(1) & 0xFF
+    if key == ord("q"):
+        print("Exiting program.")
+        break
+
+# Cleanup
+pipeline.stop()
 cv2.destroyAllWindows()

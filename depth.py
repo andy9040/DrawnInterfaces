@@ -22,14 +22,16 @@ detected_shapes = {
 # Initialize RealSense pipeline
 pipeline = rs.pipeline()
 config = rs.config()
-config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
-config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 15)  # Lower frame rate
+config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 15)  # Lower depth frame rate
+
 
 # Align depth to color stream
 align = rs.align(rs.stream.color)
 
 # Start pipeline
 pipeline.start(config)
+time.sleep(2)
 
 # Initialize MediaPipe Hands
 mp_hands = mp.solutions.hands
