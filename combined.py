@@ -32,6 +32,7 @@ mp_draw = mp.solutions.drawing_utils
 # Mode control
 mode = "shape_detection"  # Start with shape detection
 static_shapes = []  # Store detected shapes
+hand_tracking_enabled = False  # Ensure hand tracking only starts after pressing 's'
 
 def preprocess_image(frame):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -92,33 +93,40 @@ while True:
     color_image = np.asanyarray(color_frame.get_data())
     rgb_image = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
     
-    if mode == "shape_detection":
+    if mode == "shape_detection" and not hand_tracking_enabled:
+        # Only detect shapes if hand tracking is not enabled
         processed_frame, detected_shapes = detect_shapes(color_image)
-        static_shapes = detected_shapes  # Store shapes
+        static_shapes = detected_shapes  # Store shapes for future frames
     else:
+        # Once hand tracking is enabled, do not detect shapes again
         processed_frame = color_image.copy()
-        for shape, contour, color in static_shapes:
-            cv2.drawContours(processed_frame, [contour], -1, color, 3)
     
-    result = hands.process(rgb_image)
-    if result.multi_hand_landmarks:
-        for hand_landmarks in result.multi_hand_landmarks:
-            h, w, _ = color_image.shape
-            x = int(hand_landmarks.landmark[8].x * w)
-            y = int(hand_landmarks.landmark[8].y * h)
-            
-            for shape, contour, color in static_shapes:
-                if cv2.pointPolygonTest(contour, (x, y), False) >= 0:
-                    print(f"Finger touched {shape}!")
-                    sound_map[shape].play()
-                    break
-            
-            mp_draw.draw_landmarks(processed_frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+    # Draw the stored shapes even after hand tracking is enabled
+    for shape, contour, color in static_shapes:
+        cv2.drawContours(processed_frame, [contour], -1, color, 3)
+    
+    if hand_tracking_enabled:
+        result = hands.process(rgb_image)
+        if result.multi_hand_landmarks:
+            for hand_landmarks in result.multi_hand_landmarks:
+                h, w, _ = color_image.shape
+                x = int(hand_landmarks.landmark[8].x * w)
+                y = int(hand_landmarks.landmark[8].y * h)
+                
+                for shape, contour, color in static_shapes:
+                    if cv2.pointPolygonTest(contour, (x, y), False) >= 0:
+                        print(f"Finger touched {shape}!")
+                        sound_map[shape].play()
+                        break
+                
+                mp_draw.draw_landmarks(processed_frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
     
     cv2.imshow("Shape & Hand Detection", processed_frame)
     key = cv2.waitKey(1) & 0xFF
     if key == ord("s"):
-        mode = "hand_tracking"
+        hand_tracking_enabled = True  # Start hand tracking only after 's' is pressed
+        mode = "hand_tracking"  # Switch to hand tracking mode
+        print("Hand tracking enabled.")
     elif key == ord("q"):
         break
 
