@@ -1,9 +1,9 @@
 import cv2
 import numpy as np
 import pyautogui
-import mediapipe as mp
+from collections import deque
 
-# Setup
+# State
 tracked_triangle = None
 tracked_center = None
 prev_center = None
@@ -11,7 +11,9 @@ dot_present_last_frame = True
 near_edge_last_frame = False
 smoothing_factor = 0.2
 
-FRAME_EDGE_MARGIN = 60  # pixels to define "near edge"
+FRAME_EDGE_MARGIN = 60
+MAX_HISTORY = 8
+shape_history = deque(maxlen=MAX_HISTORY)
 
 def preprocess_image(frame):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -22,14 +24,36 @@ def preprocess_image(frame):
     cleaned = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
     return cleaned
 
-def find_best_triangle(frame, prev_triangle):
+def merge_contours(contours):
+    merged = []
+    used = set()
+    boxes = [cv2.boundingRect(c) for c in contours]
+
+    for i, rect1 in enumerate(boxes):
+        if i in used:
+            continue
+        x1, y1, w1, h1 = rect1
+        merged_contour = contours[i]
+        for j, rect2 in enumerate(boxes):
+            if i != j and j not in used:
+                x2, y2, w2, h2 = rect2
+                if (x1 < x2 + w2 and x1 + w1 > x2 and y1 < y2 + h2 and y1 + h1 > y2):
+                    if max(w1, h1, w2, h2) < 300:
+                        merged_contour = np.vstack((merged_contour, contours[j]))
+                        used.add(j)
+        used.add(i)
+        merged.append(cv2.convexHull(merged_contour))
+    return merged
+
+def find_best_triangle(frame, prev_triangle, prev_center):
     preprocessed = preprocess_image(frame)
     contours, _ = cv2.findContours(preprocessed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours = merge_contours(contours)
 
-    frame_area = frame.shape[0] * frame.shape[1]
     best_match = None
     best_center = None
     best_score = float('inf')
+    frame_area = frame.shape[0] * frame.shape[1]
 
     for contour in contours:
         approx = cv2.approxPolyDP(contour, 0.02 * cv2.arcLength(contour, True), True)
@@ -43,16 +67,16 @@ def find_best_triangle(frame, prev_triangle):
         M = cv2.moments(approx)
         if M["m00"] == 0:
             continue
-        cx = int(M["m10"] / M["m00"])
-        cy = int(M["m01"] / M["m00"])
+        cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
 
-        # Match by shape similarity and distance
-        if prev_triangle is not None:
-            score = cv2.matchShapes(prev_triangle, approx, 1, 0.0)
-            distance = np.linalg.norm(np.array([cx, cy]) - np.array(tracked_center))
-            score += distance / 100  # combine shape + spatial similarity
+        score = 0
+        if prev_triangle is not None and prev_center is not None:
+            shape_score = cv2.matchShapes(prev_triangle, approx, 1, 0.0)
+            dist_score = np.linalg.norm(np.array(prev_center) - np.array([cx, cy])) / 100
+            size_diff = abs(area - cv2.contourArea(prev_triangle)) / frame_area
+            score = shape_score + dist_score + size_diff
         else:
-            score = 0
+            score = area  # fallback when starting
 
         if score < best_score:
             best_score = score
@@ -88,46 +112,7 @@ def is_near_frame_edge(center, frame_shape):
         y < FRAME_EDGE_MARGIN or y > (h - FRAME_EDGE_MARGIN)
     )
 
-def detect_drawn_circle(frame, debug_frame=None):
-    """
-    Detects a single circular shape in the entire frame.
-    Returns True if circle is found, False if it is occluded (covered).
-    """
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-
-    # Threshold dark regions (circle should be black-ish)
-    _, thresh = cv2.threshold(blurred, 80, 255, cv2.THRESH_BINARY_INV)
-    thresh = cv2.GaussianBlur(thresh, (3, 3), 0)
-
-    # Show threshold debug window
-    if debug_frame is not None:
-        cv2.imshow("Global Circle Threshold", thresh)
-
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    for c in contours:
-        area = cv2.contourArea(c)
-        if area < 50 or area > 3000:
-            continue
-
-        # Circle detection via circularity
-        perimeter = cv2.arcLength(c, True)
-        if perimeter == 0:
-            continue
-        circularity = 4 * np.pi * area / (perimeter * perimeter)
-
-        if 0.7 < circularity < 1.2:
-            if debug_frame is not None:
-                (x, y, w, h) = cv2.boundingRect(c)
-                cv2.rectangle(debug_frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                cv2.putText(debug_frame, "CIRCLE", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-            return True
-
-    return False
-
-
-# Start video
+# Main loop
 cap = cv2.VideoCapture(0)
 
 if not cap.isOpened():
@@ -144,41 +129,39 @@ while True:
     display_frame = frame.copy()
     key = cv2.waitKey(1) & 0xFF
 
-    # Reset with R key
     if key == ord('r'):
         tracked_triangle = None
         tracked_center = None
         prev_center = None
         dot_present_last_frame = True
         near_edge_last_frame = False
+        shape_history.clear()
         print("Reset tracking.")
 
     if key == ord('q'):
         break
 
-    # Update triangle each frame
-    tracked_triangle, tracked_center = find_best_triangle(frame, tracked_triangle)
+    triangle, center = find_best_triangle(frame, tracked_triangle, tracked_center)
 
-    if tracked_triangle is not None:
-        cx, cy = tracked_center
-        update_mouse(tracked_center)
+    if triangle is not None:
+        shape_history.append(triangle)
+        # Optional: average triangle points to smooth contour
+        tracked_triangle = triangle
+        tracked_center = center
+        update_mouse(center)
+
         cv2.drawContours(display_frame, [tracked_triangle], -1, (255, 255, 0), 3)
-        cv2.circle(display_frame, (cx, cy), 5, (0, 255, 255), -1)
-        cv2.putText(display_frame, "TRIANGLE", (cx, cy - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
-
-        
+        cv2.circle(display_frame, tracked_center, 5, (0, 255, 255), -1)
+        cv2.putText(display_frame, "TRIANGLE", (center[0], center[1] - 15),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
     else:
-        # Detect dot inside triangle
+        if tracked_triangle is not None:
+            # Possibly occluded or dot covered — treat as click
+            pyautogui.click()
+        tracked_triangle = None
+        tracked_center = None
 
-        # If dot disappeared, and triangle is stable → click
-        # if not dot_present and (not near_edge and not near_edge_last_frame):
-        pyautogui.click()
-            # cv2.putText(display_frame, "CLICK", (cx, cy + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-
-        # dot_present_last_frame = dot_present
-        # near_edge_last_frame = near_edge
-
-    cv2.imshow("Dot Occlusion Click Tracker", display_frame)
+    cv2.imshow("Stable Triangle Tracker", display_frame)
 
 cap.release()
 cv2.destroyAllWindows()
