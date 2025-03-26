@@ -1,204 +1,163 @@
 import cv2
 import numpy as np
-import pyautogui
 from collections import deque
-import time
+import pyautogui
+import math
 
-# Setup
-tracked_triangle = None
-tracked_center = None
-prev_center = None
-locked_area = None
-locked_ratio = None
-dot_present_last_frame = True
-near_edge_last_frame = False
-smoothing_factor = 0.2
+# --- Globals for calibration ---
+adaptive_thresh_C = 4
+blur_ksize = 5
+use_adaptive = True
 
-FRAME_EDGE_MARGIN = 60
-MAX_HISTORY = 8
-shape_history = deque(maxlen=MAX_HISTORY)
+# --- Shape history and state ---
+shape_history = {}
+history_length = 10
+last_mouse_pos = None
+mouse_down = False
 
-SENSITIVITY_INCREMENT = 0.05
-MIN_SENSITIVITY = 0.05
-MAX_SENSITIVITY = 1.0
+# --- Triangle tracking ---
+tracked_triangles = []
 
-cv2.setUseOptimized(True)
+def is_equilateral_triangle(pts, tolerance=0.2):
+    if len(pts) != 3:
+        return False
+    sides = []
+    for i in range(3):
+        pt1 = pts[i][0]
+        pt2 = pts[(i+1)%3][0]
+        sides.append(np.linalg.norm(pt1 - pt2))
+    avg = sum(sides) / 3
+    return all(abs(s - avg)/avg < tolerance for s in sides)
 
 def preprocess_image(frame):
+    global adaptive_thresh_C, blur_ksize, use_adaptive
+
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                   cv2.THRESH_BINARY_INV, 11, 4)
+    blur_size = blur_ksize if blur_ksize % 2 == 1 else blur_ksize + 1
+    blurred = cv2.GaussianBlur(gray, (blur_size, blur_size), 0)
+
+    if use_adaptive:
+        thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                       cv2.THRESH_BINARY_INV, 11, adaptive_thresh_C)
+    else:
+        _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
     kernel = np.ones((3, 3), np.uint8)
     cleaned = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+    cv2.imshow("Calibrated View", cleaned)
     return cleaned
 
-def merge_contours(contours):
-    if len(contours) < 10:
-        return contours
+def detect_triangles(frame):
+    global shape_history
 
-    filtered = [c for c in contours if cv2.contourArea(c) > 500]
-    merged = []
-    used = set()
-    boxes = [cv2.boundingRect(c) for c in filtered]
-
-    for i, rect1 in enumerate(boxes):
-        if i in used:
-            continue
-        x1, y1, w1, h1 = rect1
-        merged_contour = filtered[i]
-        for j in range(i + 1, len(boxes)):
-            if j in used:
-                continue
-            x2, y2, w2, h2 = boxes[j]
-            if (
-                x1 < x2 + w2 and x1 + w1 > x2 and
-                y1 < y2 + h2 and y1 + h1 > y2 and
-                max(w1, h1, w2, h2) < 300
-            ):
-                merged_contour = np.vstack((merged_contour, filtered[j]))
-                used.add(j)
-                break
-        used.add(i)
-        merged.append(cv2.convexHull(merged_contour))
-    return merged
-
-def find_best_triangle(frame, prev_triangle, prev_center, locked_area=None, locked_ratio=None):
-    preprocessed = preprocess_image(frame)
-    contours, _ = cv2.findContours(preprocessed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    contours = merge_contours(contours)
-
-    best_match = None
-    best_center = None
-    best_score = float('inf')
-    frame_area = frame.shape[0] * frame.shape[1]
+    processed = preprocess_image(frame)
+    contours, _ = cv2.findContours(processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    triangles = []
 
     for contour in contours:
-        approx = cv2.approxPolyDP(contour, 0.02 * cv2.arcLength(contour, True), True)
-        if len(approx) != 3:
-            continue
+        approx = cv2.approxPolyDP(contour, 0.04 * cv2.arcLength(contour, True), True)
 
-        area = cv2.contourArea(approx)
-        if area < 1000 or area > frame_area * 0.6:
-            continue
-
-        M = cv2.moments(approx)
-        if M["m00"] == 0:
-            continue
-        cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
-
-        # Shape locking check
-        if locked_area is not None and locked_ratio is not None:
+        if len(approx) == 3 and is_equilateral_triangle(approx):
             x, y, w, h = cv2.boundingRect(approx)
-            ratio = w / h if h != 0 else 0
-            area_ratio = abs(area - locked_area) / locked_area
-            ratio_diff = abs(ratio - locked_ratio)
-            if area_ratio > 0.25 or ratio_diff > 0.2:
-                continue  # Skip dissimilar triangles
+            area = cv2.contourArea(approx)
 
-        score = 0
-        if prev_triangle is not None and prev_center is not None:
-            shape_score = cv2.matchShapes(prev_triangle, approx, 1, 0.0)
-            dist_score = np.linalg.norm(np.array(prev_center) - np.array([cx, cy])) / 100
-            size_diff = abs(area - cv2.contourArea(prev_triangle)) / frame_area
-            score = shape_score + dist_score + size_diff
-        else:
-            score = area
+            if area > 1000 and w > 30 and h > 30:
+                triangles.append((approx, x, y))
 
-        if score < best_score:
-            best_score = score
-            best_match = approx
-            best_center = (cx, cy)
-            current_area = area
-            x, y, w, h = cv2.boundingRect(approx)
-            current_ratio = w / h if h != 0 else 0
+    # Sort left to right by x-coordinate
+    triangles.sort(key=lambda t: t[1])
 
-    if best_match is not None:
-        return best_match, best_center, current_area, current_ratio
-    return None, None, None, None
+    return triangles[:2]  # Keep only first 2
 
-def update_mouse(center):
-    global prev_center
-    if prev_center is not None:
-        dx = center[0] - prev_center[0]
-        dy = center[1] - prev_center[1]
+def get_triangle_center(triangle):
+    M = cv2.moments(triangle)
+    if M["m00"] == 0:
+        return None
+    cx = int(M["m10"] / M["m00"])
+    cy = int(M["m01"] / M["m00"])
+    return (cx, cy)
 
-        move_x = int(dx * smoothing_factor) * 2
-        move_y = int(dy * smoothing_factor) * -2
+def control_mouse(triangles):
+    global last_mouse_pos, mouse_down
 
-        screen_width, screen_height = pyautogui.size()
-        current_mouse_x, current_mouse_y = pyautogui.position()
+    if len(triangles) == 2:
+        center = get_triangle_center(triangles[0][0])  # Leftmost triangle
+        if center:
+            if last_mouse_pos:
+                dx = center[0] - last_mouse_pos[0]
+                dy = center[1] - last_mouse_pos[1]
+                pyautogui.moveRel(dx, dy)
+            last_mouse_pos = center
+            if mouse_down:
+                pyautogui.mouseUp()
+                mouse_down = False
 
-        new_mouse_x = min(max(current_mouse_x + move_x, 0), screen_width - 1)
-        new_mouse_y = min(max(current_mouse_y + move_y, 0), screen_height - 1)
+    elif len(triangles) == 1:
+        center = get_triangle_center(triangles[0][0])
+        if center:
+            if last_mouse_pos:
+                dx = center[0] - last_mouse_pos[0]
+                dy = center[1] - last_mouse_pos[1]
+                pyautogui.moveRel(dx, dy)
+            last_mouse_pos = center
+            if not mouse_down:
+                pyautogui.mouseDown()
+                mouse_down = True
 
-        pyautogui.moveTo(new_mouse_x, new_mouse_y)
-
-    prev_center = center
-
-# Main loop
-cap = cv2.VideoCapture(0)
-
-if not cap.isOpened():
-    print("Camera not found")
-    exit()
-
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        print("Failed to capture frame")
-        break
-
-    frame = cv2.flip(frame, 1)
-    display_frame = frame.copy()
-    key = cv2.waitKey(1) & 0xFF
-
-    # Sensitivity adjustment
-    if key == ord('+') or key == ord('='):
-        smoothing_factor = min(smoothing_factor + SENSITIVITY_INCREMENT, MAX_SENSITIVITY)
-        print(f"Sensitivity increased: {smoothing_factor:.2f}")
-    elif key == ord('-') or key == ord('_'):
-        smoothing_factor = max(smoothing_factor - SENSITIVITY_INCREMENT, MIN_SENSITIVITY)
-        print(f"Sensitivity decreased: {smoothing_factor:.2f}")
-
-    # Reset
-    if key == ord('r'):
-        tracked_triangle = None
-        tracked_center = None
-        prev_center = None
-        locked_area = None
-        locked_ratio = None
-        shape_history.clear()
-        print("Reset tracking.")
-
-    if key == ord('q'):
-        break
-
-    triangle, center, area, ratio = find_best_triangle(
-        frame, tracked_triangle, tracked_center, locked_area, locked_ratio
-    )
-
-    if triangle is not None:
-        shape_history.append(triangle)
-        tracked_triangle = triangle
-        tracked_center = center
-        locked_area = area
-        locked_ratio = ratio
-        update_mouse(center)
-
-        cv2.drawContours(display_frame, [tracked_triangle], -1, (255, 255, 0), 3)
-        cv2.circle(display_frame, tracked_center, 5, (0, 255, 255), -1)
-        cv2.putText(display_frame, "TRIANGLE", (center[0], center[1] - 15),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
     else:
-        # Don't replace triangle unless similar shape is found (handled in find_best_triangle)
-        if tracked_triangle is not None:
-            pyautogui.click()
-        tracked_triangle = None
-        tracked_center = None
+        last_mouse_pos = None
+        if mouse_down:
+            pyautogui.mouseUp()
+            mouse_down = False
 
-    cv2.imshow("Triangle Mouse Tracker", display_frame)
-    time.sleep(0.01)
+def draw_triangles(frame, triangles):
+    for tri, x, y in triangles:
+        cv2.drawContours(frame, [tri], -1, (0, 255, 255), 3)
+        cv2.putText(frame, "TRIANGLE", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,255), 2)
 
-cap.release()
-cv2.destroyAllWindows()
+def handle_key_press(key):
+    global adaptive_thresh_C, blur_ksize, use_adaptive
+
+    if key == ord('1'):
+        adaptive_thresh_C = max(adaptive_thresh_C - 1, 0)
+    elif key == ord('2'):
+        adaptive_thresh_C += 1
+    elif key == ord('3'):
+        blur_ksize = max(3, blur_ksize - 2)
+    elif key == ord('4'):
+        blur_ksize += 2
+    elif key == ord('5'):
+        use_adaptive = not use_adaptive
+
+    print(f"Threshold C: {adaptive_thresh_C}, Blur: {blur_ksize}, Adaptive: {use_adaptive}")
+
+def main():
+    cap = cv2.VideoCapture(0)
+
+    if not cap.isOpened():
+        print("Could not open camera")
+        return
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print("Frame not read")
+            break
+
+        triangles = detect_triangles(frame)
+        draw_triangles(frame, triangles)
+        control_mouse(triangles)
+
+        cv2.imshow("Final Detection", frame)
+
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
+            break
+        handle_key_press(key)
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    main()
