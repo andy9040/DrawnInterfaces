@@ -9,7 +9,9 @@ tracked_center = None
 prev_center = None
 dot_present_last_frame = True
 near_edge_last_frame = False
-smoothing_factor = 0.2
+smoothing_factor = 0.4  # Increased for faster movement
+missed_frames = 0
+MISS_FRAME_THRESHOLD = 5
 
 FRAME_EDGE_MARGIN = 60
 MAX_HISTORY = 8
@@ -69,12 +71,17 @@ def find_best_triangle(frame, prev_triangle, prev_center):
             continue
         cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
 
-        score = 0
         if prev_triangle is not None and prev_center is not None:
             shape_score = cv2.matchShapes(prev_triangle, approx, 1, 0.0)
-            dist_score = np.linalg.norm(np.array(prev_center) - np.array([cx, cy])) / 100
+            if shape_score > 0.3:
+                continue  # Too different in shape
+
+            dist_score = np.linalg.norm(np.array(prev_center) - np.array([cx, cy]))
+            if dist_score > 100:
+                continue  # Too far from last known center
+
             size_diff = abs(area - cv2.contourArea(prev_triangle)) / frame_area
-            score = shape_score + dist_score + size_diff
+            score = shape_score + (dist_score / 100) + size_diff
         else:
             score = area  # fallback when starting
 
@@ -91,8 +98,8 @@ def update_mouse(center):
         dx = center[0] - prev_center[0]
         dy = center[1] - prev_center[1]
 
-        move_x = int(dx * smoothing_factor) * 2
-        move_y = int(dy * smoothing_factor) * -2
+        move_x = int(dx * smoothing_factor * 4)
+        move_y = int(dy * smoothing_factor * -4)
 
         screen_width, screen_height = pyautogui.size()
         current_mouse_x, current_mouse_y = pyautogui.position()
@@ -136,6 +143,7 @@ while True:
         dot_present_last_frame = True
         near_edge_last_frame = False
         shape_history.clear()
+        missed_frames = 0
         print("Reset tracking.")
 
     if key == ord('q'):
@@ -144,10 +152,10 @@ while True:
     triangle, center = find_best_triangle(frame, tracked_triangle, tracked_center)
 
     if triangle is not None:
-        shape_history.append(triangle)
-        # Optional: average triangle points to smooth contour
+        missed_frames = 0
         tracked_triangle = triangle
         tracked_center = center
+        shape_history.append(triangle)
         update_mouse(center)
 
         cv2.drawContours(display_frame, [tracked_triangle], -1, (255, 255, 0), 3)
@@ -155,11 +163,12 @@ while True:
         cv2.putText(display_frame, "TRIANGLE", (center[0], center[1] - 15),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
     else:
-        if tracked_triangle is not None:
-            # Possibly occluded or dot covered — treat as click
+        missed_frames += 1
+        if missed_frames >= MISS_FRAME_THRESHOLD and tracked_triangle is not None:
             pyautogui.click()
-        tracked_triangle = None
-        tracked_center = None
+            tracked_triangle = None
+            tracked_center = None
+            prev_center = None
 
     cv2.imshow("Stable Triangle Tracker", display_frame)
 
