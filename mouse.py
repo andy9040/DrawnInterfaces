@@ -88,41 +88,44 @@ def is_near_frame_edge(center, frame_shape):
         y < FRAME_EDGE_MARGIN or y > (h - FRAME_EDGE_MARGIN)
     )
 
-def detect_circle_inside_triangle(frame, triangle_contour, debug_frame=None):
+def detect_drawn_circle(frame, debug_frame=None):
     """
-    Looks for a circular contour inside the triangle region.
-    Returns True if a circle is detected, False otherwise.
+    Detects a single circular shape in the entire frame.
+    Returns True if circle is found, False if it is occluded (covered).
     """
-    mask = np.zeros(frame.shape[:2], dtype=np.uint8)
-    cv2.drawContours(mask, [triangle_contour], -1, 255, -1)
-
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    triangle_region = cv2.bitwise_and(gray, gray, mask=mask)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
 
-    # Threshold to find dark shapes (like the drawn circle)
-    _, thresh = cv2.threshold(triangle_region, 80, 255, cv2.THRESH_BINARY_INV)
+    # Threshold dark regions (circle should be black-ish)
+    _, thresh = cv2.threshold(blurred, 80, 255, cv2.THRESH_BINARY_INV)
     thresh = cv2.GaussianBlur(thresh, (3, 3), 0)
+
+    # Show threshold debug window
+    if debug_frame is not None:
+        cv2.imshow("Global Circle Threshold", thresh)
 
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     for c in contours:
         area = cv2.contourArea(c)
-        if area < 100 or area > 1000:  # filter size
+        if area < 50 or area > 3000:
             continue
 
-        # Circle = many-sided, smooth contour
-        approx = cv2.approxPolyDP(c, 0.02 * cv2.arcLength(c, True), True)
-        if len(approx) > 8:  # lots of points = round
+        # Circle detection via circularity
+        perimeter = cv2.arcLength(c, True)
+        if perimeter == 0:
+            continue
+        circularity = 4 * np.pi * area / (perimeter * perimeter)
+
+        if 0.7 < circularity < 1.2:
             if debug_frame is not None:
                 (x, y, w, h) = cv2.boundingRect(c)
                 cv2.rectangle(debug_frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
                 cv2.putText(debug_frame, "CIRCLE", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
             return True
 
-    if debug_frame is not None:
-        cv2.imshow("Circle Detection Mask", thresh)
-
     return False
+
 
 # Start video
 cap = cv2.VideoCapture(0)
@@ -164,7 +167,7 @@ while True:
         cv2.putText(display_frame, "TRIANGLE", (cx, cy - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
 
         # Detect dot inside triangle
-        dot_present = detect_circle_inside_triangle(frame, tracked_triangle, display_frame)
+        dot_present = detect_drawn_circle(frame, display_frame)
         near_edge = is_near_frame_edge(tracked_center, frame.shape)
 
         # If dot disappeared, and triangle is stable → click
