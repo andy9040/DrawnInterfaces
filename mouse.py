@@ -7,12 +7,11 @@ import mediapipe as mp
 tracked_triangle = None
 tracked_center = None
 prev_center = None
+dot_present_last_frame = True
+near_edge_last_frame = False
 smoothing_factor = 0.2
 
-# MediaPipe Hands (tuned for minimal hand visibility)
-mp_hands = mp.solutions.hands
-hands = mp_hands.Hands(static_image_mode=False, max_num_hands=1, min_detection_confidence=0.5)
-mp_draw = mp.solutions.drawing_utils
+FRAME_EDGE_MARGIN = 60  # pixels to define "near edge"
 
 def preprocess_image(frame):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -81,17 +80,33 @@ def update_mouse(center):
 
     prev_center = center
 
-def detect_finger(frame):
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    result = hands.process(rgb)
+def is_near_frame_edge(center, frame_shape):
+    h, w = frame_shape[:2]
+    x, y = center
+    return (
+        x < FRAME_EDGE_MARGIN or x > (w - FRAME_EDGE_MARGIN) or
+        y < FRAME_EDGE_MARGIN or y > (h - FRAME_EDGE_MARGIN)
+    )
 
-    if result.multi_hand_landmarks:
-        hand_landmarks = result.multi_hand_landmarks[0]
-        tip = hand_landmarks.landmark[mp_hands.HandLandmark.INDEX_FINGER_TIP]
-        h, w, _ = frame.shape
-        return int(tip.x * w), int(tip.y * h)
+def detect_dot_inside_triangle(frame, triangle_contour):
+    # Create mask for triangle
+    mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+    cv2.drawContours(mask, [triangle_contour], -1, 255, -1)
 
-    return None
+    # Extract the triangle region from grayscale
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    triangle_region = cv2.bitwise_and(gray, gray, mask=mask)
+
+    # Detect dark circular dot via simple threshold
+    _, dot_thresh = cv2.threshold(triangle_region, 50, 255, cv2.THRESH_BINARY_INV)
+    dot_contours, _ = cv2.findContours(dot_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    for c in dot_contours:
+        area = cv2.contourArea(c)
+        if 30 < area < 500:  # assume dot is small but noticeable
+            return True  # dot is present
+
+    return False  # dot not found = maybe covered
 
 # Start video
 cap = cv2.VideoCapture(0)
@@ -115,6 +130,8 @@ while True:
         tracked_triangle = None
         tracked_center = None
         prev_center = None
+        dot_present_last_frame = True
+        near_edge_last_frame = False
         print("Reset tracking.")
 
     if key == ord('q'):
@@ -130,18 +147,19 @@ while True:
         cv2.circle(display_frame, (cx, cy), 5, (0, 255, 255), -1)
         cv2.putText(display_frame, "TRIANGLE", (cx, cy - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
 
-        finger_tip = detect_finger(frame)
-        if finger_tip:
-            fx, fy = finger_tip
-            cv2.circle(display_frame, (fx, fy), 5, (255, 0, 255), -1)
+        # Detect dot inside triangle
+        dot_present = detect_dot_inside_triangle(frame, tracked_triangle)
+        near_edge = is_near_frame_edge(tracked_center, frame.shape)
 
-            # Click if finger is inside the triangle
-            inside = cv2.pointPolygonTest(tracked_triangle, (fx, fy), False)
-            if inside >= 0:
-                pyautogui.click()
-                cv2.putText(display_frame, "CLICK", (cx, cy + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+        # If dot disappeared, and triangle is stable → click
+        if not dot_present and (not near_edge and not near_edge_last_frame):
+            pyautogui.click()
+            cv2.putText(display_frame, "CLICK", (cx, cy + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
-    cv2.imshow("Smart Triangle Tracker", display_frame)
+        dot_present_last_frame = dot_present
+        near_edge_last_frame = near_edge
+
+    cv2.imshow("Dot Occlusion Click Tracker", display_frame)
 
 cap.release()
 cv2.destroyAllWindows()
