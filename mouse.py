@@ -2,8 +2,9 @@ import cv2
 import numpy as np
 import pyautogui
 from collections import deque
+import time
 
-# State
+# Setup
 tracked_triangle = None
 tracked_center = None
 prev_center = None
@@ -15,6 +16,8 @@ FRAME_EDGE_MARGIN = 60
 MAX_HISTORY = 8
 shape_history = deque(maxlen=MAX_HISTORY)
 
+cv2.setUseOptimized(True)
+
 def preprocess_image(frame):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
@@ -25,22 +28,32 @@ def preprocess_image(frame):
     return cleaned
 
 def merge_contours(contours):
+    """Merge small overlapping contours efficiently to avoid slowdowns."""
+    if len(contours) < 10:
+        return contours
+
+    filtered = [c for c in contours if cv2.contourArea(c) > 500]
     merged = []
     used = set()
-    boxes = [cv2.boundingRect(c) for c in contours]
+    boxes = [cv2.boundingRect(c) for c in filtered]
 
     for i, rect1 in enumerate(boxes):
         if i in used:
             continue
         x1, y1, w1, h1 = rect1
-        merged_contour = contours[i]
-        for j, rect2 in enumerate(boxes):
-            if i != j and j not in used:
-                x2, y2, w2, h2 = rect2
-                if (x1 < x2 + w2 and x1 + w1 > x2 and y1 < y2 + h2 and y1 + h1 > y2):
-                    if max(w1, h1, w2, h2) < 300:
-                        merged_contour = np.vstack((merged_contour, contours[j]))
-                        used.add(j)
+        merged_contour = filtered[i]
+        for j in range(i + 1, len(boxes)):
+            if j in used:
+                continue
+            x2, y2, w2, h2 = boxes[j]
+            if (
+                x1 < x2 + w2 and x1 + w1 > x2 and
+                y1 < y2 + h2 and y1 + h1 > y2 and
+                max(w1, h1, w2, h2) < 300
+            ):
+                merged_contour = np.vstack((merged_contour, filtered[j]))
+                used.add(j)
+                break  # Only merge one to limit complexity
         used.add(i)
         merged.append(cv2.convexHull(merged_contour))
     return merged
@@ -145,7 +158,6 @@ while True:
 
     if triangle is not None:
         shape_history.append(triangle)
-        # Optional: average triangle points to smooth contour
         tracked_triangle = triangle
         tracked_center = center
         update_mouse(center)
@@ -156,12 +168,12 @@ while True:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
     else:
         if tracked_triangle is not None:
-            # Possibly occluded or dot covered — treat as click
             pyautogui.click()
         tracked_triangle = None
         tracked_center = None
 
     cv2.imshow("Stable Triangle Tracker", display_frame)
+    time.sleep(0.01)  # Optional: limit FPS to reduce CPU usage
 
 cap.release()
 cv2.destroyAllWindows()
