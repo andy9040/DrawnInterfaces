@@ -88,25 +88,38 @@ def is_near_frame_edge(center, frame_shape):
         y < FRAME_EDGE_MARGIN or y > (h - FRAME_EDGE_MARGIN)
     )
 
-def detect_dot_inside_triangle(frame, triangle_contour):
-    # Create mask for triangle
+def detect_dot_inside_triangle(frame, triangle_contour, debug_frame=None):
+    """
+    Detects a dark dot inside the triangle using intensity thresholding.
+    Optionally shows the detection mask on debug_frame.
+    """
     mask = np.zeros(frame.shape[:2], dtype=np.uint8)
     cv2.drawContours(mask, [triangle_contour], -1, 255, -1)
 
-    # Extract the triangle region from grayscale
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     triangle_region = cv2.bitwise_and(gray, gray, mask=mask)
 
-    # Detect dark circular dot via simple threshold
-    _, dot_thresh = cv2.threshold(triangle_region, 50, 255, cv2.THRESH_BINARY_INV)
-    dot_contours, _ = cv2.findContours(dot_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # Use adaptive or fixed threshold to detect darker regions
+    _, dot_thresh = cv2.threshold(triangle_region, 60, 255, cv2.THRESH_BINARY_INV)
+    dot_thresh = cv2.GaussianBlur(dot_thresh, (3, 3), 0)
+    cv2.imshow("Dot Detection Mask", dot_thresh)
 
-    for c in dot_contours:
+    contours, _ = cv2.findContours(dot_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    found_dot = False
+    for c in contours:
         area = cv2.contourArea(c)
-        if 30 < area < 500:  # assume dot is small but noticeable
-            return True  # dot is present
+        if 30 < area < 1000:  # tuned for ~10–30px radius dots
+            (x, y, w, h) = cv2.boundingRect(c)
+            if debug_frame is not None:
+                cv2.rectangle(debug_frame, (x, y), (x + w, y + h), (0, 0, 255), 2)
+                cv2.putText(debug_frame, "DOT", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+            found_dot = True
 
-    return False  # dot not found = maybe covered
+    if debug_frame is not None:
+        cv2.imshow("Dot Detection Mask", dot_thresh)
+
+    return found_dot
 
 # Start video
 cap = cv2.VideoCapture(0)
@@ -148,7 +161,7 @@ while True:
         cv2.putText(display_frame, "TRIANGLE", (cx, cy - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
 
         # Detect dot inside triangle
-        dot_present = detect_dot_inside_triangle(frame, tracked_triangle)
+        dot_present = detect_dot_inside_triangle(frame, tracked_triangle, display_frame)
         near_edge = is_near_frame_edge(tracked_center, frame.shape)
 
         # If dot disappeared, and triangle is stable → click
