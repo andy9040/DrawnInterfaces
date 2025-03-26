@@ -1,19 +1,8 @@
 import cv2
 import numpy as np
-import pyrealsense2 as rs
 import pyautogui
-import time
 
-# Initialize RealSense
-pipeline = rs.pipeline()
-config = rs.config()
-config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
-align = rs.align(rs.stream.color)
-pipeline.start(config)
-time.sleep(2)
-
-# Mouse state
+# --- Mouse control state ---
 last_mouse_pos = None
 mouse_down = False
 
@@ -99,24 +88,27 @@ def draw_triangles(frame, triangles):
         cv2.drawContours(frame, [tri], -1, (0, 255, 255), 3)
         cv2.circle(frame, get_center(tri), 5, (0, 255, 0), -1)
 
-# Main loop
+# OpenCV camera capture
+cap = cv2.VideoCapture(0)
+
+if not cap.isOpened():
+    print("Could not open webcam")
+    exit()
+
 while True:
-    frames = pipeline.wait_for_frames()
-    aligned_frames = align.process(frames)
-    color_frame = aligned_frames.get_color_frame()
+    ret, frame = cap.read()
+    if not ret:
+        print("Failed to grab frame")
+        break
 
-    if not color_frame:
-        continue
-
-    frame = np.asanyarray(color_frame.get_data())
     triangles = detect_triangles(frame)
     control_mouse(triangles)
     draw_triangles(frame, triangles)
 
     cv2.imshow("Triangle Mouse Controller", frame)
-    key = cv2.waitKey(1) & 0xFF
-    if key == ord("q"):
+
+    if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
-pipeline.stop()
+cap.release()
 cv2.destroyAllWindows()
