@@ -8,6 +8,8 @@ import time
 tracked_triangle = None
 tracked_center = None
 prev_center = None
+locked_area = None
+locked_ratio = None
 dot_present_last_frame = True
 near_edge_last_frame = False
 smoothing_factor = 0.2
@@ -15,6 +17,10 @@ smoothing_factor = 0.2
 FRAME_EDGE_MARGIN = 60
 MAX_HISTORY = 8
 shape_history = deque(maxlen=MAX_HISTORY)
+
+SENSITIVITY_INCREMENT = 0.05
+MIN_SENSITIVITY = 0.05
+MAX_SENSITIVITY = 1.0
 
 cv2.setUseOptimized(True)
 
@@ -28,7 +34,6 @@ def preprocess_image(frame):
     return cleaned
 
 def merge_contours(contours):
-    """Merge small overlapping contours efficiently to avoid slowdowns."""
     if len(contours) < 10:
         return contours
 
@@ -53,12 +58,12 @@ def merge_contours(contours):
             ):
                 merged_contour = np.vstack((merged_contour, filtered[j]))
                 used.add(j)
-                break  # Only merge one to limit complexity
+                break
         used.add(i)
         merged.append(cv2.convexHull(merged_contour))
     return merged
 
-def find_best_triangle(frame, prev_triangle, prev_center):
+def find_best_triangle(frame, prev_triangle, prev_center, locked_area=None, locked_ratio=None):
     preprocessed = preprocess_image(frame)
     contours, _ = cv2.findContours(preprocessed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     contours = merge_contours(contours)
@@ -82,6 +87,15 @@ def find_best_triangle(frame, prev_triangle, prev_center):
             continue
         cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
 
+        # Shape locking check
+        if locked_area is not None and locked_ratio is not None:
+            x, y, w, h = cv2.boundingRect(approx)
+            ratio = w / h if h != 0 else 0
+            area_ratio = abs(area - locked_area) / locked_area
+            ratio_diff = abs(ratio - locked_ratio)
+            if area_ratio > 0.25 or ratio_diff > 0.2:
+                continue  # Skip dissimilar triangles
+
         score = 0
         if prev_triangle is not None and prev_center is not None:
             shape_score = cv2.matchShapes(prev_triangle, approx, 1, 0.0)
@@ -89,14 +103,19 @@ def find_best_triangle(frame, prev_triangle, prev_center):
             size_diff = abs(area - cv2.contourArea(prev_triangle)) / frame_area
             score = shape_score + dist_score + size_diff
         else:
-            score = area  # fallback when starting
+            score = area
 
         if score < best_score:
             best_score = score
             best_match = approx
             best_center = (cx, cy)
+            current_area = area
+            x, y, w, h = cv2.boundingRect(approx)
+            current_ratio = w / h if h != 0 else 0
 
-    return best_match, best_center
+    if best_match is not None:
+        return best_match, best_center, current_area, current_ratio
+    return None, None, None, None
 
 def update_mouse(center):
     global prev_center
@@ -117,14 +136,6 @@ def update_mouse(center):
 
     prev_center = center
 
-def is_near_frame_edge(center, frame_shape):
-    h, w = frame_shape[:2]
-    x, y = center
-    return (
-        x < FRAME_EDGE_MARGIN or x > (w - FRAME_EDGE_MARGIN) or
-        y < FRAME_EDGE_MARGIN or y > (h - FRAME_EDGE_MARGIN)
-    )
-
 # Main loop
 cap = cv2.VideoCapture(0)
 
@@ -142,24 +153,37 @@ while True:
     display_frame = frame.copy()
     key = cv2.waitKey(1) & 0xFF
 
+    # Sensitivity adjustment
+    if key == ord('+') or key == ord('='):
+        smoothing_factor = min(smoothing_factor + SENSITIVITY_INCREMENT, MAX_SENSITIVITY)
+        print(f"Sensitivity increased: {smoothing_factor:.2f}")
+    elif key == ord('-') or key == ord('_'):
+        smoothing_factor = max(smoothing_factor - SENSITIVITY_INCREMENT, MIN_SENSITIVITY)
+        print(f"Sensitivity decreased: {smoothing_factor:.2f}")
+
+    # Reset
     if key == ord('r'):
         tracked_triangle = None
         tracked_center = None
         prev_center = None
-        dot_present_last_frame = True
-        near_edge_last_frame = False
+        locked_area = None
+        locked_ratio = None
         shape_history.clear()
         print("Reset tracking.")
 
     if key == ord('q'):
         break
 
-    triangle, center = find_best_triangle(frame, tracked_triangle, tracked_center)
+    triangle, center, area, ratio = find_best_triangle(
+        frame, tracked_triangle, tracked_center, locked_area, locked_ratio
+    )
 
     if triangle is not None:
         shape_history.append(triangle)
         tracked_triangle = triangle
         tracked_center = center
+        locked_area = area
+        locked_ratio = ratio
         update_mouse(center)
 
         cv2.drawContours(display_frame, [tracked_triangle], -1, (255, 255, 0), 3)
@@ -167,13 +191,14 @@ while True:
         cv2.putText(display_frame, "TRIANGLE", (center[0], center[1] - 15),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
     else:
+        # Don't replace triangle unless similar shape is found (handled in find_best_triangle)
         if tracked_triangle is not None:
             pyautogui.click()
         tracked_triangle = None
         tracked_center = None
 
-    cv2.imshow("Stable Triangle Tracker", display_frame)
-    time.sleep(0.01)  # Optional: limit FPS to reduce CPU usage
+    cv2.imshow("Triangle Mouse Tracker", display_frame)
+    time.sleep(0.01)
 
 cap.release()
 cv2.destroyAllWindows()
