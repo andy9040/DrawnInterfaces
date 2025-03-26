@@ -18,7 +18,7 @@ mouse_down = False
 # --- Triangle tracking ---
 tracked_triangles = []
 
-def is_equilateral_triangle(pts, tolerance=0.2):
+def is_equilateral_triangle(pts, tolerance=0.4):
     if len(pts) != 3:
         return False
     sides = []
@@ -28,6 +28,7 @@ def is_equilateral_triangle(pts, tolerance=0.2):
         sides.append(np.linalg.norm(pt1 - pt2))
     avg = sum(sides) / 3
     return all(abs(s - avg)/avg < tolerance for s in sides)
+
 
 def preprocess_image(frame):
     global adaptive_thresh_C, blur_ksize, use_adaptive
@@ -53,16 +54,18 @@ def detect_triangles(frame):
 
     processed = preprocess_image(frame)
     contours, _ = cv2.findContours(processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
     triangles = []
 
     for contour in contours:
-        approx = cv2.approxPolyDP(contour, 0.04 * cv2.arcLength(contour, True), True)
+        approx = cv2.approxPolyDP(contour, 0.08 * cv2.arcLength(contour, True), True)
+
 
         if len(approx) == 3 and is_equilateral_triangle(approx):
             x, y, w, h = cv2.boundingRect(approx)
             area = cv2.contourArea(approx)
 
-            if area > 1000 and w > 30 and h > 30:
+            if area > 500 and w > 20 and h > 20:
                 triangles.append((approx, x, y))
 
     # Sort left to right by x-coordinate
