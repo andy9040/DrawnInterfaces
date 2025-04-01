@@ -77,8 +77,8 @@ def find_best_square(frame):
         # Optional: check for squareness (right angles)
         (x, y, w, h) = cv2.boundingRect(approx)
         aspect_ratio = float(w) / h
-        if aspect_ratio < 0.75 or aspect_ratio > 1.25:
-            continue
+        # if aspect_ratio < 0.75 or aspect_ratio > 1.25:
+        #     continue
 
         if area > max_area:
             max_area = area

@@ -2,5 +2,6 @@ opencv-python
 numpy
 pyrealsense2-macosx
 pygame
+keyboard
 numpy
 pyautogui
