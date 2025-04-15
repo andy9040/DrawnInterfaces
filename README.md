@@ -1,7 +1,8 @@
 # MusicDepth
 This repository showcases a series of experiments in sketch-based interaction, where hand-drawn shapes on paper are transformed into interactive digital controls using computer vision. The project explores how simple drawings — when tracked in real-time — can become functional input devices, music controllers, and creative instruments.
 
-🧩 Project Components
+## 🧩 Project Components
+
 🖱️ 1. Paper Mouse
 Turn a piece of paper into a functioning mouse by drawing a control shape (e.g. triangle) and using computer vision to track its movement. Supports motion tracking, click emulation, and cursor control.
 
